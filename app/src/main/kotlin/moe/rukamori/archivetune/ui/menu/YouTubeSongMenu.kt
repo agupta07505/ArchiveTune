@@ -118,7 +118,9 @@ fun YouTubeSongMenu(
     val database = LocalDatabase.current
     val playerConnection = LocalPlayerConnection.current ?: return
     val librarySong by database.song(song.id).collectAsState(initial = null)
-    val download by LocalDownloadUtil.current.getDownload(song.id).collectAsState(initial = null)
+    val downloadUtil = LocalDownloadUtil.current
+    val download by downloadUtil.getDownload(song.id).collectAsState(initial = null)
+    val exportText = stringResource(R.string.export_song)
     val coroutineScope = rememberCoroutineScope()
     var pendingExportSong by remember { mutableStateOf<SongItem?>(null) }
     val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -129,7 +131,7 @@ fun YouTubeSongMenu(
         if (uri != null && songToExport != null) {
             coroutineScope.launch {
                 android.widget.Toast.makeText(context, R.string.export_started, android.widget.Toast.LENGTH_SHORT).show()
-                val result = LocalDownloadUtil.current.exportSong(context, songToExport.id, uri)
+                val result = downloadUtil.exportSong(context, songToExport.id, uri)
                 if (result.isSuccess) {
                     android.widget.Toast.makeText(context, R.string.export_success, android.widget.Toast.LENGTH_SHORT).show()
                 } else {
@@ -452,7 +454,7 @@ fun YouTubeSongMenu(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     },
-                    text = stringResource(R.string.export_song),
+                    text = exportText,
                     onClick = {
                         val extension = when {
                             librarySong?.format?.mimeType?.contains("webm") == true || librarySong?.format?.mimeType?.contains("opus") == true -> "opus"

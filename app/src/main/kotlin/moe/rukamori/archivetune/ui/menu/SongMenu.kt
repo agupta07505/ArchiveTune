@@ -137,9 +137,11 @@ fun SongMenu(
     val playerConnection = LocalPlayerConnection.current ?: return
     val songState = database.song(originalSong.id).collectAsState(initial = originalSong)
     val song = songState.value ?: originalSong
-    val download by LocalDownloadUtil.current
+    val downloadUtil = LocalDownloadUtil.current
+    val download by downloadUtil
         .getDownload(originalSong.id)
         .collectAsState(initial = null)
+    val exportText = stringResource(R.string.export_song)
     val coroutineScope = rememberCoroutineScope()
     var pendingExportSong by remember { mutableStateOf<Song?>(null) }
     val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -150,7 +152,7 @@ fun SongMenu(
         if (uri != null && songToExport != null) {
             coroutineScope.launch {
                 android.widget.Toast.makeText(context, R.string.export_started, android.widget.Toast.LENGTH_SHORT).show()
-                val result = LocalDownloadUtil.current.exportSong(context, songToExport.id, uri)
+                val result = downloadUtil.exportSong(context, songToExport.id, uri)
                 if (result.isSuccess) {
                     android.widget.Toast.makeText(context, R.string.export_success, android.widget.Toast.LENGTH_SHORT).show()
                 } else {
@@ -559,7 +561,7 @@ fun SongMenu(
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             },
-                            text = stringResource(R.string.export_song),
+                            text = exportText,
                             onClick = {
                                 val extension = when {
                                     song.format?.mimeType?.contains("webm") == true || song.format?.mimeType?.contains("opus") == true -> "opus"

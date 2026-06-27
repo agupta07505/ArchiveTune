@@ -180,6 +180,11 @@ fun PlayerMenu(
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
     val librarySong by database.song(mediaMetadata.id).collectAsState(initial = null)
     val coroutineScope = rememberCoroutineScope()
+    val downloadUtil = LocalDownloadUtil.current
+    val download by downloadUtil
+        .getDownload(mediaMetadata.id)
+        .collectAsState(initial = null)
+    val exportText = stringResource(R.string.export_song)
     var pendingExportSongId by remember { mutableStateOf<String?>(null) }
     val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument("audio/*")
@@ -189,7 +194,7 @@ fun PlayerMenu(
         if (uri != null && songId != null) {
             coroutineScope.launch {
                 android.widget.Toast.makeText(context, R.string.export_started, android.widget.Toast.LENGTH_SHORT).show()
-                val result = LocalDownloadUtil.current.exportSong(context, songId, uri)
+                val result = downloadUtil.exportSong(context, songId, uri)
                 if (result.isSuccess) {
                     android.widget.Toast.makeText(context, R.string.export_success, android.widget.Toast.LENGTH_SHORT).show()
                 } else {
@@ -203,10 +208,6 @@ fun PlayerMenu(
             onDismiss()
         }
     }
-
-    val download by LocalDownloadUtil.current
-        .getDownload(mediaMetadata.id)
-        .collectAsState(initial = null)
 
     val artists =
         remember(mediaMetadata.artists) {
@@ -610,7 +611,7 @@ fun PlayerMenu(
                                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         },
-                                        text = stringResource(R.string.export_song),
+                                        text = exportText,
                                         onClick = {
                                             val extension = when {
                                                 librarySong?.format?.mimeType?.contains("webm") == true || librarySong?.format?.mimeType?.contains("opus") == true -> "opus"
