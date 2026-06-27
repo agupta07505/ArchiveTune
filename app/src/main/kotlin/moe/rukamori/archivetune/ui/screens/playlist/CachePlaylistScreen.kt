@@ -96,6 +96,8 @@ import coil3.request.allowHardware
 import coil3.toBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import moe.rukamori.archivetune.db.entities.Song
 import android.content.Intent
 import android.provider.DocumentsContract
 import android.widget.Toast
@@ -145,6 +147,10 @@ fun CachePlaylistScreen(
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
     val downloadUtil = LocalDownloadUtil.current
+
+    val isPlaying by playerConnection.isPlaying.collectAsState()
+    val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
+    val cachedSongs by viewModel.cachedSongs.collectAsState()
 
     var isExportingAll by remember { mutableStateOf(false) }
     var exportSongsList by remember { mutableStateOf<List<Song>>(emptyList()) }
@@ -236,10 +242,6 @@ fun CachePlaylistScreen(
         isExportingAll = false
         exportSongsList = emptyList()
     }
-
-    val isPlaying by playerConnection.isPlaying.collectAsState()
-    val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
-    val cachedSongs by viewModel.cachedSongs.collectAsState()
 
     val (sortType, onSortTypeChange) =
         rememberEnumPreference(

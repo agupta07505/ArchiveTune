@@ -96,6 +96,7 @@ import coil3.request.allowHardware
 import coil3.toBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import android.content.Intent
 import android.provider.DocumentsContract
 import android.widget.Toast
@@ -150,7 +151,93 @@ fun AutoPlaylistScreen(
     val focusManager = LocalFocusManager.current
     val playerConnection = LocalPlayerConnection.current ?: return
     val coroutineScope = rememberCoroutineScope()
+    val isPlaying by playerConnection.isPlaying.collectAsStateWithLifecycle()
+    val mediaMetadata by playerConnection.mediaMetadata.collectAsStateWithLifecycle()
+    val playlist =
+        if (viewModel.playlist == "liked") stringResource(R.string.liked) else stringResource(R.string.offline)
+
+    val songs by viewModel.likedSongs.collectAsStateWithLifecycle()
+
+    var isSearching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf(TextFieldValue()) }
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(isSearching) {
+        if (isSearching) {
+            focusRequester.requestFocus()
+        }
+    }
+
+    val (ytmSync) = rememberPreference(YtmSyncKey, true)
+    val (disableBlur) = rememberPreference(DisableBlurKey, false)
+
+    val likeLength = remember(songs) { songs.fastSumBy { it.song.duration } }
+
+    val playlistId = viewModel.playlist
+    val playlistType =
+        when (playlistId) {
+            "liked" -> PlaylistType.LIKE
+            "downloaded" -> PlaylistType.DOWNLOAD
+            else -> PlaylistType.OTHER
+        }
+
+    val wrappedSongs =
+        remember(songs) {
+            songs.map { item -> ItemWrapper(item) }.toMutableStateList()
+        }
+
+    var selection by remember { mutableStateOf(false) }
+    val selectedCount by remember(wrappedSongs) {
+        derivedStateOf { wrappedSongs.count { it.isSelected } }
+    }
+
+    LaunchedEffect(selection, selectedCount) {
+        if (selection && selectedCount == 0) {
+            selection = false
+        }
+    }
+
+    if (isSearching) {
+        BackHandler {
+            isSearching = false
+            query = TextFieldValue()
+        }
+    } else if (selection) {
+        BackHandler {
+            selection = false
+            wrappedSongs.forEach { it.isSelected = false }
+        }
+    }
+
+    val (sortType, onSortTypeChange) =
+        rememberEnumPreference(
+            AutoPlaylistSongSortTypeKey,
+            AutoPlaylistSongSortType.CREATE_DATE,
+        )
+    val (sortDescending, onSortDescendingChange) = rememberPreference(AutoPlaylistSongSortDescendingKey, true)
+
     val downloadUtil = LocalDownloadUtil.current
+    var downloads by remember { mutableStateOf<Map<String, Download>>(emptyMap()) }
+    var downloadState by remember { mutableStateOf<HeaderDownloadState>(HeaderDownloadState.None) }
+
+    LaunchedEffect(ytmSync, playlistType) {
+        if (ytmSync && playlistType == PlaylistType.LIKE) {
+            viewModel.syncLikedSongs()
+        }
+    }
+
+    LaunchedEffect(songs) {
+        val songIds = songs.map { it.song.id }
+        if (songIds.isEmpty()) {
+            downloads = emptyMap()
+            downloadState = HeaderDownloadState.None
+            return@LaunchedEffect
+        }
+        downloadUtil.downloads.collect { currentDownloads ->
+            downloads = currentDownloads
+            downloadState = headerDownloadState(songIds, currentDownloads)
+        }
+    }
 
     var isExportingAll by remember { mutableStateOf(false) }
     var exportSongsList by remember { mutableStateOf<List<Song>>(emptyList()) }
@@ -241,93 +328,6 @@ fun AutoPlaylistScreen(
         }
         isExportingAll = false
         exportSongsList = emptyList()
-    }
-    val isPlaying by playerConnection.isPlaying.collectAsStateWithLifecycle()
-    val mediaMetadata by playerConnection.mediaMetadata.collectAsStateWithLifecycle()
-    val playlist =
-        if (viewModel.playlist == "liked") stringResource(R.string.liked) else stringResource(R.string.offline)
-
-    val songs by viewModel.likedSongs.collectAsStateWithLifecycle()
-
-    var isSearching by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf(TextFieldValue()) }
-    val focusRequester = remember { FocusRequester() }
-
-    LaunchedEffect(isSearching) {
-        if (isSearching) {
-            focusRequester.requestFocus()
-        }
-    }
-
-    val (ytmSync) = rememberPreference(YtmSyncKey, true)
-    val (disableBlur) = rememberPreference(DisableBlurKey, false)
-
-    val likeLength = remember(songs) { songs.fastSumBy { it.song.duration } }
-
-    val playlistId = viewModel.playlist
-    val playlistType =
-        when (playlistId) {
-            "liked" -> PlaylistType.LIKE
-            "downloaded" -> PlaylistType.DOWNLOAD
-            else -> PlaylistType.OTHER
-        }
-
-    val wrappedSongs =
-        remember(songs) {
-            songs.map { item -> ItemWrapper(item) }.toMutableStateList()
-        }
-
-    var selection by remember { mutableStateOf(false) }
-    val selectedCount by remember(wrappedSongs) {
-        derivedStateOf { wrappedSongs.count { it.isSelected } }
-    }
-
-    LaunchedEffect(selection, selectedCount) {
-        if (selection && selectedCount == 0) {
-            selection = false
-        }
-    }
-
-    if (isSearching) {
-        BackHandler {
-            isSearching = false
-            query = TextFieldValue()
-        }
-    } else if (selection) {
-        BackHandler {
-            selection = false
-            wrappedSongs.forEach { it.isSelected = false }
-        }
-    }
-
-    val (sortType, onSortTypeChange) =
-        rememberEnumPreference(
-            AutoPlaylistSongSortTypeKey,
-            AutoPlaylistSongSortType.CREATE_DATE,
-        )
-    val (sortDescending, onSortDescendingChange) = rememberPreference(AutoPlaylistSongSortDescendingKey, true)
-
-    val downloadUtil = LocalDownloadUtil.current
-    var downloads by remember { mutableStateOf<Map<String, Download>>(emptyMap()) }
-    var downloadState by remember { mutableStateOf<HeaderDownloadState>(HeaderDownloadState.None) }
-
-    LaunchedEffect(ytmSync, playlistType) {
-        if (ytmSync && playlistType == PlaylistType.LIKE) {
-            viewModel.syncLikedSongs()
-        }
-    }
-
-    LaunchedEffect(songs) {
-        val songIds = songs.map { it.song.id }
-        if (songIds.isEmpty()) {
-            downloads = emptyMap()
-            downloadState = HeaderDownloadState.None
-            return@LaunchedEffect
-        }
-        downloadUtil.downloads.collect { currentDownloads ->
-            downloads = currentDownloads
-            downloadState = headerDownloadState(songIds, currentDownloads)
-        }
     }
 
     var showRemoveDownloadDialog by remember { mutableStateOf(false) }
