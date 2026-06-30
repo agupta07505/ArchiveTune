@@ -9,6 +9,10 @@ package moe.rukamori.archivetune.storage
 
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.DocumentsContract.Document
+import androidx.core.net.toUri
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.exoplayer.offline.Download
@@ -16,18 +20,22 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import moe.rukamori.archivetune.R
+import moe.rukamori.archivetune.constants.DownloadedSongsFolderTreeUriKey
 import moe.rukamori.archivetune.db.MusicDatabase
 import moe.rukamori.archivetune.db.entities.FormatEntity
 import moe.rukamori.archivetune.db.entities.Song
 import moe.rukamori.archivetune.di.DownloadCache
 import moe.rukamori.archivetune.di.PlayerCache
+import moe.rukamori.archivetune.utils.dataStore
 import org.json.JSONArray
 import org.json.JSONObject
 import timber.log.Timber
 import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import javax.inject.Inject
@@ -66,16 +74,33 @@ class DownloadedSongExporter
                     if (cachedSpans.isEmpty()) return@withContext false
 
                     val metadata = ExportedSongMetadata.from(songId, song, fallbackTitle, context)
+                    val fileName =
+                        buildExportFileName(
+                            metadata = metadata,
+                            mimeType = format?.mimeType,
+                        )
+                    val metadataJson =
+                        buildMetadataJson(
+                            audioLength = cachedSpans.sumOf { span -> span.length },
+                            metadata = metadata,
+                            format = format,
+                        )
+                    if (
+                        exportToSelectedFolder(
+                            songId = songId,
+                            fileName = fileName,
+                            mimeType = format?.mimeType,
+                            metadataJson = metadataJson,
+                            spans = cachedSpans,
+                        )
+                    ) {
+                        return@withContext true
+                    }
+
                     val targetDirectory = StorageLocationRepository.exportedDownloadsDirectory(context)
                     if (!targetDirectory.ensureWritableDirectory()) return@withContext false
 
-                    val targetFile =
-                        targetDirectory.resolve(
-                            buildExportFileName(
-                                metadata = metadata,
-                                mimeType = format?.mimeType,
-                            ),
-                        )
+                    val targetFile = targetDirectory.resolve(fileName)
                     deleteExistingExports(
                         directory = targetDirectory,
                         songId = songId,
@@ -94,8 +119,7 @@ class DownloadedSongExporter
 
                     writeMetadataFile(
                         audioFile = targetFile,
-                        metadata = metadata,
-                        format = format,
+                        metadataJson = metadataJson,
                     )
                     MediaScannerConnection.scanFile(
                         context,
@@ -115,6 +139,16 @@ class DownloadedSongExporter
 
         suspend fun remove(songId: String): Boolean =
             withContext(Dispatchers.IO) {
+                runCatching {
+                    selectedTreeUri()?.let { treeUri ->
+                        deleteExistingTreeExports(
+                            treeUri = treeUri,
+                            songId = songId,
+                        )
+                    }
+                }.onFailure { throwable ->
+                    Timber.tag(LogTag).w(throwable, "Failed to remove exported tree song %s", songId)
+                }
                 val targetDirectory = StorageLocationRepository.exportedDownloadsDirectory(context)
                 if (!targetDirectory.exists()) return@withContext true
                 deleteExistingExports(
@@ -151,6 +185,64 @@ class DownloadedSongExporter
             return database.getSongById(songId)
         }
 
+        private suspend fun selectedTreeUri(): Uri? =
+            context
+                .dataStore
+                .data
+                .first()[DownloadedSongsFolderTreeUriKey]
+                ?.takeIf(String::isNotBlank)
+                ?.toUri()
+
+        private suspend fun exportToSelectedFolder(
+            songId: String,
+            fileName: String,
+            mimeType: String?,
+            metadataJson: String,
+            spans: List<CacheSpan>,
+        ): Boolean {
+            val treeUri = selectedTreeUri() ?: return false
+            return runCatching {
+                deleteExistingTreeExports(
+                    treeUri = treeUri,
+                    songId = songId,
+                )
+                val resolver = context.contentResolver
+                val parentUri = treeUri.toDocumentUri()
+                val audioUri =
+                    DocumentsContract.createDocument(
+                        resolver,
+                        parentUri,
+                        exportMimeType(mimeType),
+                        fileName,
+                    ) ?: return@runCatching false
+                val copied =
+                    resolver.openOutputStream(audioUri, "w")?.use { outputStream ->
+                        copyCachedSpansTo(
+                            spans = spans,
+                            outputStream = outputStream,
+                        ) > 0L
+                    } ?: false
+                if (!copied) {
+                    runCatching { DocumentsContract.deleteDocument(resolver, audioUri) }
+                    return@runCatching false
+                }
+
+                val metadataUri =
+                    DocumentsContract.createDocument(
+                        resolver,
+                        treeUri.toDocumentUri(),
+                        MetadataMimeType,
+                        "$fileName.json",
+                    )
+                metadataUri?.let { uri ->
+                    resolver.openOutputStream(uri, "w")?.use { outputStream ->
+                        outputStream.write(metadataJson.toByteArray(Charsets.UTF_8))
+                    }
+                }
+                true
+            }.getOrDefault(false)
+        }
+
         private fun copyCachedSpans(
             spans: List<CacheSpan>,
             targetFile: File,
@@ -160,24 +252,7 @@ class DownloadedSongExporter
                 val tempFile = targetFile.resolveSibling("${targetFile.name}.tmp-${System.currentTimeMillis()}")
                 var exportedBytes = 0L
                 tempFile.outputStream().use { outputStream ->
-                    var expectedPosition = 0L
-                    spans.forEach { span ->
-                        val sourceFile = span.file ?: error("Missing cache span file")
-                        if (span.position > expectedPosition) {
-                            error("Cache span gap at $expectedPosition for ${span.key}")
-                        }
-                        val overlapBytes = (expectedPosition - span.position).coerceAtLeast(0L)
-                        if (overlapBytes >= span.length) return@forEach
-                        sourceFile.inputStream().use { inputStream ->
-                            inputStream.skipFully(overlapBytes)
-                            inputStream.copyLimitedTo(
-                                outputStream = outputStream,
-                                byteCount = span.length - overlapBytes,
-                            )
-                        }
-                        expectedPosition = max(expectedPosition, span.position + span.length)
-                    }
-                    exportedBytes = expectedPosition
+                    exportedBytes = copyCachedSpansTo(spans, outputStream)
                 }
                 if (targetFile.exists() && !targetFile.delete()) {
                     tempFile.delete()
@@ -192,27 +267,10 @@ class DownloadedSongExporter
 
         private fun writeMetadataFile(
             audioFile: File,
-            metadata: ExportedSongMetadata,
-            format: FormatEntity?,
+            metadataJson: String,
         ) {
             val metadataFile = audioFile.resolveSibling("${audioFile.name}.json")
-            metadataFile.writeText(
-                JSONObject()
-                    .put("id", metadata.id)
-                    .put("title", metadata.title)
-                    .put("artists", JSONArray().apply { metadata.artists.forEach { artist -> put(artist) } })
-                    .putOptional("album", metadata.album)
-                    .put("durationSeconds", metadata.durationSeconds)
-                    .putOptional("thumbnailUrl", metadata.thumbnailUrl)
-                    .putOptional("downloadedAt", metadata.downloadedAt)
-                    .putOptional("mimeType", format?.mimeType)
-                    .putOptional("codecs", format?.codecs?.takeIf(String::isNotBlank))
-                    .put("bitrate", format?.bitrate ?: 0)
-                    .put("sampleRate", format?.sampleRate ?: 0)
-                    .put("contentLength", format?.contentLength ?: audioFile.length())
-                    .put("source", "ArchiveTune")
-                    .toString(MetadataJsonIndentSpaces),
-            )
+            metadataFile.writeText(metadataJson)
         }
 
         private fun deleteExistingExports(
@@ -230,15 +288,45 @@ class DownloadedSongExporter
                     if (!runCatching { file.delete() || !file.exists() }.getOrDefault(false)) {
                         deleted = false
                     }
+            }
+            return deleted
+        }
+
+        private fun deleteExistingTreeExports(
+            treeUri: Uri,
+            songId: String,
+        ): Boolean {
+            val marker = exportIdMarker(songId)
+            val resolver = context.contentResolver
+            val childrenUri = treeUri.toChildDocumentsUri()
+            var deleted = true
+            resolver
+                .query(
+                    childrenUri,
+                    arrayOf(Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    val idIndex = cursor.getColumnIndexOrThrow(Document.COLUMN_DOCUMENT_ID)
+                    val nameIndex = cursor.getColumnIndexOrThrow(Document.COLUMN_DISPLAY_NAME)
+                    while (cursor.moveToNext()) {
+                        val displayName = cursor.getString(nameIndex) ?: continue
+                        if (!displayName.contains(marker)) continue
+                        val documentUri = treeUri.toChildDocumentUri(cursor.getString(idIndex))
+                        if (!runCatching { DocumentsContract.deleteDocument(resolver, documentUri) }.getOrDefault(false)) {
+                            deleted = false
+                        }
+                    }
                 }
             return deleted
         }
 
         private companion object {
             const val LogTag = "DownloadedSongExporter"
-            const val MetadataJsonIndentSpaces = 2
             const val MetadataLoadRetryCount = 5
             const val MetadataLoadRetryDelayMillis = 200L
+            const val MetadataMimeType = "application/json"
         }
     }
 
@@ -309,6 +397,51 @@ private fun exportMimeType(mimeType: String?): String =
         else -> mimeType.normalizedMimeType().ifBlank { "audio/mp4" }
     }
 
+private fun buildMetadataJson(
+    audioLength: Long,
+    metadata: ExportedSongMetadata,
+    format: FormatEntity?,
+): String =
+    JSONObject()
+        .put("id", metadata.id)
+        .put("title", metadata.title)
+        .put("artists", JSONArray().apply { metadata.artists.forEach { artist -> put(artist) } })
+        .putOptional("album", metadata.album)
+        .put("durationSeconds", metadata.durationSeconds)
+        .putOptional("thumbnailUrl", metadata.thumbnailUrl)
+        .putOptional("downloadedAt", metadata.downloadedAt)
+        .putOptional("mimeType", format?.mimeType)
+        .putOptional("codecs", format?.codecs?.takeIf(String::isNotBlank))
+        .put("bitrate", format?.bitrate ?: 0)
+        .put("sampleRate", format?.sampleRate ?: 0)
+        .put("contentLength", format?.contentLength ?: audioLength)
+        .put("source", "ArchiveTune")
+        .toString(MetadataJsonIndentSpaces)
+
+private fun copyCachedSpansTo(
+    spans: List<CacheSpan>,
+    outputStream: OutputStream,
+): Long {
+    var expectedPosition = 0L
+    spans.forEach { span ->
+        val sourceFile = span.file ?: error("Missing cache span file")
+        if (span.position > expectedPosition) {
+            error("Cache span gap at $expectedPosition for ${span.key}")
+        }
+        val overlapBytes = (expectedPosition - span.position).coerceAtLeast(0L)
+        if (overlapBytes >= span.length) return@forEach
+        sourceFile.inputStream().use { inputStream ->
+            inputStream.skipFully(overlapBytes)
+            inputStream.copyLimitedTo(
+                outputStream = outputStream,
+                byteCount = span.length - overlapBytes,
+            )
+        }
+        expectedPosition = max(expectedPosition, span.position + span.length)
+    }
+    return expectedPosition
+}
+
 private fun String?.normalizedMimeType(): String =
     this
         ?.substringBefore(';')
@@ -362,8 +495,23 @@ private fun JSONObject.putOptional(
         put(key, value)
     }
 
+private fun Uri.toDocumentUri(): Uri =
+    DocumentsContract.buildDocumentUriUsingTree(
+        this,
+        DocumentsContract.getTreeDocumentId(this),
+    )
+
+private fun Uri.toChildDocumentsUri(): Uri =
+    DocumentsContract.buildChildDocumentsUriUsingTree(
+        this,
+        DocumentsContract.getTreeDocumentId(this),
+    )
+
+private fun Uri.toChildDocumentUri(documentId: String): Uri = DocumentsContract.buildDocumentUriUsingTree(this, documentId)
+
 private val UnsafeFileNameCharacters = Regex("""[\\/:*?"<>|\u0000-\u001F]""")
 private val WhitespaceRegex = Regex("\\s+")
+private const val MetadataJsonIndentSpaces = 2
 private const val CopyBufferSizeBytes = 256 * 1024
 
 private data class ExportedSongMetadata(
