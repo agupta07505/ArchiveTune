@@ -132,6 +132,10 @@ fun StorageSettings(
         remember(context) {
             StorageLocationRepository.cacheDirectory(context, StorageFolderKind.DOWNLOADS)
         }
+    val exportedDownloadsDir =
+        remember(context) {
+            StorageLocationRepository.exportedDownloadsDirectory(context)
+        }
     val playerCacheDir =
         remember(context) {
             StorageLocationRepository.cacheDirectory(context, StorageFolderKind.SONG_CACHE)
@@ -255,13 +259,15 @@ fun StorageSettings(
                 }
         }
     }
-    LaunchedEffect(downloadCache, downloadCacheDir) {
+    LaunchedEffect(downloadCache, downloadCacheDir, exportedDownloadsDir) {
         while (isActive) {
             delay(StorageRefreshIntervalMillis)
             downloadCacheSize =
                 withContext(Dispatchers.IO) {
                     val cacheSpace = tryOrNull { downloadCache.cacheSpace } ?: 0L
-                    if (cacheSpace == 0L) downloadCacheDir.directorySizeBytes() else cacheSpace
+                    val downloadCacheBytes =
+                        if (cacheSpace == 0L) downloadCacheDir.directorySizeBytes() else cacheSpace
+                    downloadCacheBytes + exportedDownloadsDir.directorySizeBytes()
                 }
         }
     }
