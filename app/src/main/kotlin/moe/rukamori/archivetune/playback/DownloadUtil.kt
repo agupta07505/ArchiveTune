@@ -230,10 +230,11 @@ class DownloadUtil
                     result[cursor.download.request.id] = cursor.download
                 }
                 downloads.value = result
-                result
-                    .values
-                    .filter { download -> download.state == Download.STATE_COMPLETED }
-                    .forEach { download -> downloadedSongExporter.export(download) }
+                for (download in result.values) {
+                    if (download.state == Download.STATE_COMPLETED) {
+                        downloadedSongExporter.export(download)
+                    }
+                }
             }
             downloadScope.launch {
                 var previousFingerprint: String? = null
